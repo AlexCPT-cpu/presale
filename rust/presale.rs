@@ -134,11 +134,17 @@ impl CandyMachine {
         Ok(elapsed_months * monthly_release)
     }
 
-    fn enable_initial_claim(&mut self) -> ProgramResult {
+    fn enable_initial_claim(&mut self, authority_account: &AccountInfo) -> ProgramResult {
+        // Verify that the caller is the contract owner (admin)
+        if *authority_account.key != self.authority {
+            return Err(ProgramError::InvalidAccountData);
+        }
+
         // Calculate total claimable tokens for the beneficiary
-        let mut total_claimable_tokens = 0;
-        for (_, _, claimable_tokens) in &self.buyer_purchases {
-            total_claimable_tokens += claimable_tokens;
+        let total_claimable_tokens = self.buyer_purchases.iter().map(|(_, _, claimable_tokens)| claimable_tokens).sum::<u64>();
+
+        if total_claimable_tokens == 0 {
+            return Err(ProgramError::NoVestedTokens);
         }
 
         // Update last release timestamp
@@ -169,18 +175,28 @@ impl CandyMachine {
         claimable_tokens
     }
 
-    fn deposit_tokens(&mut self, admin_account: &AccountInfo, amount: u64) -> ProgramResult {
+    fn deposit_tokens(&mut self, authority_account: &AccountInfo, token_account: &AccountInfo, amount: u64) -> ProgramResult {
+        // Verify that the caller is the contract owner (admin)
+        if *authority_account.key != self.authority {
+            return Err(ProgramError::InvalidAccountData);
+        }
+
+        // Ensure token_account is a valid account
+        if token_account.data_is_empty() {
+            return Err(ProgramError::InvalidAccountData);
+        }
+
         // Transfer tokens from admin's account to the program's token account
         solana_program::program::invoke(
             &spl_token::instruction::transfer(
                 &spl_token::id(),
-                admin_account.key,
+                authority_account.key,
                 &self.token_account,
-                admin_account.key,
+                authority_account.key,
                 &[],
                 amount,
             )?,
-            &[admin_account.clone(), self.token_account.clone()],
+            &[authority_account.clone(), self.token_account.clone()],
         )?;
 
         self.total_tokens += amount;
@@ -230,7 +246,7 @@ fn process_instruction(
             }
 
             // Call the enable_initial_claim function
-            candy_machine.enable_initial_claim()?;
+            candy_machine.enable_initial_claim(authority_account)?;
         },
         // Instruction to claim tokens
         b"claim_tokens" => {
@@ -249,16 +265,11 @@ fn process_instruction(
                 return Err(ProgramError::InvalidAccountData);
             }
 
-            // Ensure token_account is a valid account
-            if token_account.data_is_empty() {
-                return Err(ProgramError::InvalidAccountData);
-            }
-
             let amount_bytes = &instruction_data[0..8];
             let amount = u64::from_le_bytes(amount_bytes.try_into().unwrap());
 
             // Call the deposit_tokens function
-            candy_machine.deposit_tokens(token_account, amount)?;
+            candy_machine.deposit_tokens(authority_account, token_account, amount)?;
         },
         // Add more cases for other instructions if needed
         _ => return Err(ProgramError::InvalidInstruction),
