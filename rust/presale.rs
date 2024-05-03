@@ -2,153 +2,240 @@ use solana_program::{
     account_info::{next_account_info, AccountInfo},
     entrypoint,
     entrypoint::ProgramResult,
-    msg,
     program_error::ProgramError,
     pubkey::Pubkey,
-    system_instruction,
-    sysvar::{clock},
+    solana_program::clock::UnixTimestamp,
+    sysvar::clock,
 };
 
 entrypoint!(process_instruction);
 
-struct PresaleInfo {
-    beneficiary: Pubkey,
+struct CandyMachine {
+    authority: Pubkey,
+    token_account: Pubkey,
     total_tokens: u64,
     token_price: u64,
     sold_tokens: u64,
-    presale_closed: bool,
+    release_percentage: u8, // Percentage released on TGE
+    vesting_period_months: u8,
+    last_release_timestamp: UnixTimestamp,
+    buyer_purchases: Vec<(Pubkey, u64, u64)>, // Store each buyer's purchase amount and claimable tokens
 }
 
-impl PresaleInfo {
-    fn new(beneficiary: Pubkey, total_tokens: u64, token_price: u64) -> Self {
+impl CandyMachine {
+    fn new(authority: Pubkey, token_account: Pubkey, total_tokens: u64, token_price: u64, release_percentage: u8, vesting_period_months: u8) -> Self {
         Self {
-            beneficiary,
+            authority,
+            token_account,
             total_tokens,
             token_price,
             sold_tokens: 0,
-            presale_closed: false,
+            release_percentage,
+            vesting_period_months,
+            last_release_timestamp: 0, // Initial value
+            buyer_purchases: Vec::new(), // Initialize empty vector
         }
     }
+
+    fn purchase_tokens(&mut self, buyer_account: &AccountInfo, amount: u64) -> ProgramResult {
+        let amount_to_pay = amount * self.token_price;
+        let buyer_lamports = buyer_account.lamports();
+        
+        if buyer_lamports < amount_to_pay {
+            return Err(ProgramError::InsufficientFunds);
+        }
+
+        // Check if tokens are available for sale
+        let remaining_tokens = self.total_tokens - self.sold_tokens;
+        let tokens_to_sell = remaining_tokens.min(amount);
+
+        // Calculate and update sold tokens
+        let tokens_sold = tokens_to_sell * self.token_price;
+        self.sold_tokens += tokens_sold;
+
+        // Calculate claimable tokens (20% initially)
+        let claimable_tokens = tokens_sold * 20 / 100;
+
+        // Transfer SOL from buyer to token account
+        solana_program::program::invoke(
+            &solana_program::system_instruction::transfer(
+                buyer_account.key,
+                self.token_account,
+                amount_to_pay,
+            ),
+            &[buyer_account.clone()],
+        )?;
+
+        // Store buyer's purchase amount and claimable tokens
+        self.buyer_purchases.push((*buyer_account.key, amount, claimable_tokens));
+
+        Ok(())
+    }
+
+    fn claim_tokens(&mut self, beneficiary_account: &AccountInfo) -> ProgramResult {
+        let mut total_claimable_tokens = 0;
+        let current_timestamp = clock::get()?.unix_timestamp;
+
+        // Calculate total claimable tokens for the beneficiary
+        for (_, _, claimable_tokens) in &self.buyer_purchases {
+            total_claimable_tokens += claimable_tokens;
+        }
+
+        if total_claimable_tokens == 0 {
+            return Err(ProgramError::NoVestedTokens);
+        }
+
+        // Distribute claimable tokens to beneficiary
+        for (buyer_pubkey, _, claimable_tokens) in &mut self.buyer_purchases {
+            let vested_amount = self.calculate_vested_amount(claimable_tokens, *buyer_pubkey, current_timestamp)?;
+            if vested_amount == 0 {
+                continue; // Skip if no vested tokens
+            }
+
+            // Transfer vested tokens to beneficiary
+            solana_program::program::invoke(
+                &spl_token::instruction::transfer(
+                    &spl_token::id(),
+                    self.token_account,
+                    beneficiary_account.key,
+                    self.authority,
+                    &[],
+                    vested_amount,
+                )?,
+                &[self.token_account.clone(), beneficiary_account.clone(), self.authority.clone()],
+            )?;
+
+            // Update claimable tokens for the buyer
+            *claimable_tokens -= vested_amount;
+        }
+
+        Ok(())
+    }
+
+    fn calculate_vested_amount(&self, claimable_tokens: &u64, account: &Pubkey, current_timestamp: UnixTimestamp) -> Result<u64, ProgramError> {
+        let elapsed_months = (current_timestamp - self.last_release_timestamp) / (30 * 24 * 60 * 60); // Assume 30 days per month
+
+        // Check if vesting period is over
+        if elapsed_months < 2 {
+            return Ok(0); // Cliff period (no vesting)
+        }
+
+        // Calculate vested amount based on vesting schedule
+        let monthly_release = *claimable_tokens * 10 / 100; // 10% released monthly
+        Ok(elapsed_months * monthly_release)
+    }
+
+    fn enable_initial_claim(&mut self) -> ProgramResult {
+        // Calculate total claimable tokens for the beneficiary
+        let mut total_claimable_tokens = 0;
+        for (_, _, claimable_tokens) in &self.buyer_purchases {
+            total_claimable_tokens += claimable_tokens;
+        }
+
+        // Update last release timestamp
+        self.last_release_timestamp = clock::get()?.unix_timestamp;
+
+        Ok(())
+    }
+
+    fn get_vested_tokens(&self, account: &Pubkey) -> u64 {
+        let mut vested_tokens = 0;
+
+        // Calculate total vested tokens for the beneficiary
+        for (_, _, claimable_tokens) in &self.buyer_purchases {
+            vested_tokens += claimable_tokens;
+        }
+
+        vested_tokens
+    }
+
+    fn get_claimable_tokens(&self, account: &Pubkey) -> u64 {
+        let mut claimable_tokens = 0;
+
+        // Calculate total claimable tokens for the beneficiary
+        for (_, _, tokens) in &self.buyer_purchases {
+            claimable_tokens += tokens;
+        }
+
+        claimable_tokens
+    }
+
+    fn deposit_tokens(&mut self, admin_account: &AccountInfo, amount: u64) -> ProgramResult {
+        // Transfer tokens from admin's account to the program's token account
+        solana_program::program::invoke(
+            &spl_token::instruction::transfer(
+                &spl_token::id(),
+                admin_account.key,
+                &self.token_account,
+                admin_account.key,
+                &[],
+                amount,
+            )?,
+            &[admin_account.clone(), self.token_account.clone()],
+        )?;
+
+        self.total_tokens += amount;
+
+        Ok(())
+    }
+
 }
+
 
 fn process_instruction(
     _program_id: &Pubkey,
     accounts: &[AccountInfo],
-    _instruction_data: &[u8],
+    instruction_data: &[u8],
 ) -> ProgramResult {
     let accounts_iter = &mut accounts.iter();
 
-    let presale_account = next_account_info(accounts_iter)?;
-    let beneficiary_account = next_account_info(accounts_iter)?;
+    let candy_machine_account = next_account_info(accounts_iter)?;
     let token_account = next_account_info(accounts_iter)?;
-    let system_program_account = next_account_info(accounts_iter)?;
-    let clock_account = next_account_info(accounts_iter)?;
+    let authority_account = next_account_info(accounts_iter)?;
 
-    let mut presale_info = PresaleInfo::unpack_unchecked(&presale_account.data.borrow())?;
+    let mut candy_machine = CandyMachine::unpack_unchecked(&candy_machine_account.data.borrow())?;
 
-    // Check if presale is closed
-    if presale_info.presale_closed {
-        return Err(ProgramError::InvalidAccountData);
+    // Parse instruction data and dispatch appropriate function
+    match instruction_data {
+        // Instruction to purchase tokens
+        b"purchase_tokens" => {
+            // Ensure instruction data contains at least 40 bytes (32 bytes for pubkey + 8 bytes for amount)
+            if instruction_data.len() < 40 {
+                return Err(ProgramError::InvalidInstructionData);
+            }
+
+            // Parse instruction data to extract buyer's pubkey and purchase amount
+            let buyer_pubkey_bytes = &instruction_data[0..32];
+            let amount_bytes = &instruction_data[32..40];
+            let buyer_pubkey = Pubkey::new_from_array(*buyer_pubkey_bytes);
+            let amount = u64::from_le_bytes(amount_bytes.try_into().unwrap());
+    
+            // Call the purchase_tokens function
+            candy_machine.purchase_tokens(&buyer_pubkey, amount)?;
+        },
+        // Add more cases for other instructions if needed
+        _ => return Err(ProgramError::InvalidInstruction),
     }
 
-    // Check if presale is sold out
-    if presale_info.sold_tokens >= presale_info.total_tokens {
-        presale_info.presale_closed = true;
-        presale_info.pack_into(&mut presale_account.data.borrow_mut())?;
-        return Err(ProgramError::InvalidAccountData);
-    }
-
-    // Calculate the number of tokens to purchase
-    let remaining_tokens = presale_info.total_tokens - presale_info.sold_tokens;
-    let purchase_amount = clock::get()?.unix_timestamp as u64 * presale_info.token_price;
-    let tokens_to_purchase = if purchase_amount > remaining_tokens {
-        remaining_tokens
-    } else {
-        purchase_amount
-    };
-
-    // Update sold tokens
-    presale_info.sold_tokens += tokens_to_purchase;
-
-    // Transfer SOL to beneficiary
-    let transfer_sol_ix = system_instruction::transfer(
-        token_account.key,
-        beneficiary_account.key,
-        tokens_to_purchase * presale_info.token_price,
-    );
-    solana_program::program::invoke(
-        &transfer_sol_ix,
-        &[token_account.clone(), beneficiary_account.clone(), system_program_account.clone()],
-    )?;
-
-    // Transfer tokens to purchaser (for illustration purposes, replace this with actual token transfer)
-    let transfer_tokens_ix = system_instruction::transfer(
-        token_account.key,
-        beneficiary_account.key,
-        tokens_to_purchase,
-    );
-    solana_program::program::invoke(
-        &transfer_tokens_ix,
-        &[token_account.clone(), beneficiary_account.clone(), system_program_account.clone()],
-    )?;
-
-    // Update presale account data
-    presale_info.pack_into(&mut presale_account.data.borrow_mut())?;
+    // Update candy machine account data
+    candy_machine.pack_into(&mut candy_machine_account.data.borrow_mut())?;
 
     Ok(())
 }
 
-impl PresaleInfo {
+impl CandyMachine {
     fn pack_into<'a>(&self, dst: &'a mut [u8]) -> Result<&'a mut [u8], ProgramError> {
-        let mut dst = dst;
-        let mut src = self.try_to_vec()?;
-        let start = dst.len().checked_sub(src.len()).ok_or(ProgramError::InvalidAccountData)?;
-        let end = start + src.len();
-        dst[start..end].copy_from_slice(&src);
+        // Serialization logic goes here
+        // Example: Use bincode to serialize the struct into bytes
+        let encoded = bincode::serialize(self)?;
+        dst.copy_from_slice(&encoded);
         Ok(dst)
     }
 
-    fn try_to_vec(&self) -> Result<Vec<u8>, ProgramError> {
-        let mut buf = Vec::with_capacity(Self::LEN);
-        buf.extend_from_slice(&self.beneficiary.to_bytes());
-        buf.extend_from_slice(&self.total_tokens.to_le_bytes());
-        buf.extend_from_slice(&self.token_price.to_le_bytes());
-        buf.extend_from_slice(&self.sold_tokens.to_le_bytes());
-        buf.push(self.presale_closed as u8);
-        Ok(buf)
-    }
-
     fn unpack_unchecked(src: &[u8]) -> Result<Self, ProgramError> {
-        let mut src = src;
-        let beneficiary = Pubkey::new_from_array(Self::read_array(&mut src)?);
-        let total_tokens = Self::read_u64(&mut src);
-        let token_price = Self::read_u64(&mut src);
-        let sold_tokens = Self::read_u64(&mut src);
-        let presale_closed = src[0] != 0;
-        Ok(Self {
-            beneficiary,
-            total_tokens,
-            token_price,
-            sold_tokens,
-            presale_closed,
-        })
+        // Deserialization logic goes here
+        // Example: Use bincode to deserialize bytes into the struct
+        let decoded: Self = bincode::deserialize(src)?;
+        Ok(decoded)
     }
-
-    fn read_array(src: &mut &[u8]) -> Result<[u8; 32], ProgramError> {
-        let mut arr = [0u8; 32];
-        let src_arr = src.get(..32).ok_or(ProgramError::InvalidAccountData)?;
-        arr.copy_from_slice(src_arr);
-        *src = &src[32..];
-        Ok(arr)
-    }
-
-    fn read_u64(src: &mut &[u8]) -> u64 {
-        let arr = src.get(..8).unwrap_or_default();
-        *src = &src[8..];
-        u64::from_le_bytes(*arr)
-    }
-}
-
-impl PresaleInfo {
-    const LEN: usize = 1 + 32 + 8 + 8 + 8 + 8;
 }
