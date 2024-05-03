@@ -7,6 +7,10 @@ use solana_program::{
     solana_program::clock::UnixTimestamp,
     sysvar::clock,
 };
+use spl_token::{
+    instruction::{transfer as token_transfer_instruction},
+    state::Account as TokenAccount,
+};
 
 entrypoint!(process_instruction);
 
@@ -56,21 +60,26 @@ impl CandyMachine {
         // Calculate claimable tokens (20% initially)
         let claimable_tokens = tokens_sold * 20 / 100;
 
-        // Transfer SOL from buyer to token account
-        solana_program::program::invoke(
-            &solana_program::system_instruction::transfer(
-                buyer_account.key,
-                self.token_account,
-                amount_to_pay,
-            ),
-            &[buyer_account.clone()],
-        )?;
+        // Check if the buyer has already made a purchase
+        let mut buyer_found = false;
+        for (_, existing_amount, existing_claimable) in &mut self.buyer_purchases {
+            if buyer_account.key == existing_amount {
+                // If buyer found, update existing purchase entry
+                *existing_amount += amount;
+                *existing_claimable += claimable_tokens;
+                buyer_found = true;
+                break;
+            }
+        }
 
-        // Store buyer's purchase amount and claimable tokens
-        self.buyer_purchases.push((*buyer_account.key, amount, claimable_tokens));
+        // If buyer not found, create a new purchase entry
+        if !buyer_found {
+            self.buyer_purchases.push((*buyer_account.key, amount, claimable_tokens));
+        }
 
         Ok(())
     }
+
 
     fn claim_tokens(&mut self, beneficiary_account: &AccountInfo) -> ProgramResult {
         let mut total_claimable_tokens = 0;
@@ -212,6 +221,44 @@ fn process_instruction(
     
             // Call the purchase_tokens function
             candy_machine.purchase_tokens(&buyer_pubkey, amount)?;
+        },
+        // Instruction to enable initial claim
+        b"enable_initial_claim" => {
+            // Ensure authority account is the caller
+            if authority_account.key != &candy_machine.authority {
+                return Err(ProgramError::InvalidAccountData);
+            }
+
+            // Call the enable_initial_claim function
+            candy_machine.enable_initial_claim()?;
+        },
+        // Instruction to claim tokens
+        b"claim_tokens" => {
+            // Ensure beneficiary account is the caller
+            if authority_account.key != &candy_machine.authority {
+                return Err(ProgramError::InvalidAccountData);
+            }
+
+            // Call the claim_tokens function
+            candy_machine.claim_tokens(authority_account)?;
+        },
+        // Instruction to deposit tokens
+        b"deposit_tokens" => {
+            // Ensure authority account is the caller
+            if authority_account.key != &candy_machine.authority {
+                return Err(ProgramError::InvalidAccountData);
+            }
+
+            // Ensure token_account is a valid account
+            if token_account.data_is_empty() {
+                return Err(ProgramError::InvalidAccountData);
+            }
+
+            let amount_bytes = &instruction_data[0..8];
+            let amount = u64::from_le_bytes(amount_bytes.try_into().unwrap());
+
+            // Call the deposit_tokens function
+            candy_machine.deposit_tokens(token_account, amount)?;
         },
         // Add more cases for other instructions if needed
         _ => return Err(ProgramError::InvalidInstruction),
