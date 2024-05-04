@@ -1,19 +1,22 @@
+#[cfg(not(feature = "no-entrypoint"))]
 use solana_program::{
     account_info::{next_account_info, AccountInfo},
     entrypoint,
     entrypoint::ProgramResult,
     program_error::ProgramError,
     pubkey::Pubkey,
-    solana_program::clock::UnixTimestamp,
-    sysvar::clock,
+    sysvar::{clock::Clock, Sysvar},
 };
-use spl_token::{
-    instruction::{transfer as token_transfer_instruction},
-    state::Account as TokenAccount,
-};
+
+use spl_token::instruction::transfer;
+use serde::{Serialize, Deserialize};
+
+// Rest of your code...
+
 
 entrypoint!(process_instruction);
 
+#[derive(Serialize, Deserialize)]
 struct CandyMachine {
     authority: Pubkey,
     token_account: Pubkey,
@@ -22,12 +25,19 @@ struct CandyMachine {
     sold_tokens: u64,
     release_percentage: u8, // Percentage released on TGE
     vesting_period_months: u8,
-    last_release_timestamp: UnixTimestamp,
+    last_release_timestamp: i64, // Unix timestamp
     buyer_purchases: Vec<(Pubkey, u64, u64)>, // Store each buyer's purchase amount and claimable tokens
 }
 
 impl CandyMachine {
-    fn new(authority: Pubkey, token_account: Pubkey, total_tokens: u64, token_price: u64, release_percentage: u8, vesting_period_months: u8) -> Self {
+    fn new(
+        authority: Pubkey,
+        token_account: Pubkey,
+        total_tokens: u64,
+        token_price: u64,
+        release_percentage: u8,
+        vesting_period_months: u8,
+    ) -> Self {
         Self {
             authority,
             token_account,
@@ -41,13 +51,8 @@ impl CandyMachine {
         }
     }
 
-    fn purchase_tokens(&mut self, buyer_account: &AccountInfo, amount: u64) -> ProgramResult {
+    fn purchase_tokens(&mut self, buyer_account: &Pubkey, amount: u64) -> ProgramResult {
         let amount_to_pay = amount * self.token_price;
-        let buyer_lamports = buyer_account.lamports();
-        
-        if buyer_lamports < amount_to_pay {
-            return Err(ProgramError::InsufficientFunds);
-        }
 
         // Check if tokens are available for sale
         let remaining_tokens = self.total_tokens - self.sold_tokens;
@@ -62,8 +67,8 @@ impl CandyMachine {
 
         // Check if the buyer has already made a purchase
         let mut buyer_found = false;
-        for (_, existing_amount, existing_claimable) in &mut self.buyer_purchases {
-            if buyer_account.key == existing_amount {
+        for (existing_buyer_account, existing_amount, existing_claimable) in &mut self.buyer_purchases {
+            if buyer_account == existing_buyer_account {
                 // If buyer found, update existing purchase entry
                 *existing_amount += amount;
                 *existing_claimable += claimable_tokens;
@@ -74,16 +79,15 @@ impl CandyMachine {
 
         // If buyer not found, create a new purchase entry
         if !buyer_found {
-            self.buyer_purchases.push((*buyer_account.key, amount, claimable_tokens));
+            self.buyer_purchases.push((*buyer_account, amount, claimable_tokens));
         }
 
         Ok(())
     }
 
-
     fn claim_tokens(&mut self, beneficiary_account: &AccountInfo) -> ProgramResult {
         let mut total_claimable_tokens = 0;
-        let current_timestamp = clock::get()?.unix_timestamp;
+        let current_timestamp = Clock::get()?.unix_timestamp;
 
         // Calculate total claimable tokens for the beneficiary
         for (_, _, claimable_tokens) in &self.buyer_purchases {
@@ -91,7 +95,7 @@ impl CandyMachine {
         }
 
         if total_claimable_tokens == 0 {
-            return Err(ProgramError::NoVestedTokens);
+            return Err(ProgramError::Custom(1)); // Custom error code for no vested tokens
         }
 
         // Distribute claimable tokens to beneficiary
@@ -101,17 +105,20 @@ impl CandyMachine {
                 continue; // Skip if no vested tokens
             }
 
-            // Transfer vested tokens to beneficiary
+            let token_program_id = spl_token::id();
+
+            let transfer_instruction = spl_token::instruction::transfer(
+                &token_program_id,
+                &self.token_account,
+                beneficiary_account.key,
+                &self.authority,
+                &[],
+                vested_amount,
+            )?;
+
             solana_program::program::invoke(
-                &spl_token::instruction::transfer(
-                    &spl_token::id(),
-                    self.token_account,
-                    beneficiary_account.key,
-                    self.authority,
-                    &[],
-                    vested_amount,
-                )?,
-                &[self.token_account.clone(), beneficiary_account.clone(), self.authority.clone()],
+                &transfer_instruction,
+                &[self.token_account, beneficiary_account, self.authority],
             )?;
 
             // Update claimable tokens for the buyer
@@ -121,7 +128,7 @@ impl CandyMachine {
         Ok(())
     }
 
-    fn calculate_vested_amount(&self, claimable_tokens: &u64, account: &Pubkey, current_timestamp: UnixTimestamp) -> Result<u64, ProgramError> {
+    fn calculate_vested_amount(&self, claimable_tokens: &u64, _account: Pubkey, current_timestamp: i64) -> Result<u64, ProgramError> {
         let elapsed_months = (current_timestamp - self.last_release_timestamp) / (30 * 24 * 60 * 60); // Assume 30 days per month
 
         // Check if vesting period is over
@@ -131,12 +138,12 @@ impl CandyMachine {
 
         // Calculate vested amount based on vesting schedule
         let monthly_release = *claimable_tokens * 10 / 100; // 10% released monthly
-        Ok(elapsed_months * monthly_release)
+        Ok(elapsed_months as u64 * monthly_release)
     }
 
-    fn enable_initial_claim(&mut self, authority_account: &AccountInfo) -> ProgramResult {
+    fn enable_initial_claim(&mut self, authority_account: &Pubkey) -> ProgramResult {
         // Verify that the caller is the contract owner (admin)
-        if *authority_account.key != self.authority {
+        if *authority_account != self.authority {
             return Err(ProgramError::InvalidAccountData);
         }
 
@@ -144,45 +151,18 @@ impl CandyMachine {
         let total_claimable_tokens = self.buyer_purchases.iter().map(|(_, _, claimable_tokens)| claimable_tokens).sum::<u64>();
 
         if total_claimable_tokens == 0 {
-            return Err(ProgramError::NoVestedTokens);
+            return Err(ProgramError::Custom(1)); // Custom error code for no vested tokens
         }
 
         // Update last release timestamp
-        self.last_release_timestamp = clock::get()?.unix_timestamp;
+        self.last_release_timestamp = Clock::get()?.unix_timestamp;
 
         Ok(())
     }
 
-    fn get_vested_tokens(&self, account: &Pubkey) -> u64 {
-        let mut vested_tokens = 0;
-
-        // Calculate total vested tokens for the beneficiary
-        for (_, _, claimable_tokens) in &self.buyer_purchases {
-            vested_tokens += claimable_tokens;
-        }
-
-        vested_tokens
-    }
-
-    fn get_claimable_tokens(&self, account: &Pubkey) -> u64 {
-        let mut claimable_tokens = 0;
-
-        // Calculate total claimable tokens for the beneficiary
-        for (_, _, tokens) in &self.buyer_purchases {
-            claimable_tokens += tokens;
-        }
-
-        claimable_tokens
-    }
-
-    fn deposit_tokens(&mut self, authority_account: &AccountInfo, token_account: &AccountInfo, amount: u64) -> ProgramResult {
+    fn deposit_tokens(&mut self, authority_account: &AccountInfo, amount: u64) -> ProgramResult {
         // Verify that the caller is the contract owner (admin)
         if *authority_account.key != self.authority {
-            return Err(ProgramError::InvalidAccountData);
-        }
-
-        // Ensure token_account is a valid account
-        if token_account.data_is_empty() {
             return Err(ProgramError::InvalidAccountData);
         }
 
@@ -196,7 +176,7 @@ impl CandyMachine {
                 &[],
                 amount,
             )?,
-            &[authority_account.clone(), self.token_account.clone()],
+            &[authority_account, self.token_account],
         )?;
 
         self.total_tokens += amount;
@@ -205,7 +185,6 @@ impl CandyMachine {
     }
 
 }
-
 
 fn process_instruction(
     _program_id: &Pubkey,
@@ -232,11 +211,12 @@ fn process_instruction(
             // Parse instruction data to extract buyer's pubkey and purchase amount
             let buyer_pubkey_bytes = &instruction_data[0..32];
             let amount_bytes = &instruction_data[32..40];
-            let buyer_pubkey = Pubkey::new_from_array(*buyer_pubkey_bytes);
+            let mut buyer_pubkey = [0u8; 32];
+            buyer_pubkey.copy_from_slice(buyer_pubkey_bytes);
             let amount = u64::from_le_bytes(amount_bytes.try_into().unwrap());
-    
+
             // Call the purchase_tokens function
-            candy_machine.purchase_tokens(&buyer_pubkey, amount)?;
+            candy_machine.purchase_tokens(&Pubkey::new_from_array(buyer_pubkey), amount)?;
         },
         // Instruction to enable initial claim
         b"enable_initial_claim" => {
@@ -246,7 +226,7 @@ fn process_instruction(
             }
 
             // Call the enable_initial_claim function
-            candy_machine.enable_initial_claim(authority_account)?;
+            candy_machine.enable_initial_claim(&candy_machine.authority)?;
         },
         // Instruction to claim tokens
         b"claim_tokens" => {
@@ -269,10 +249,10 @@ fn process_instruction(
             let amount = u64::from_le_bytes(amount_bytes.try_into().unwrap());
 
             // Call the deposit_tokens function
-            candy_machine.deposit_tokens(authority_account, token_account, amount)?;
+            candy_machine.deposit_tokens(authority_account, amount)?;
         },
         // Add more cases for other instructions if needed
-        _ => return Err(ProgramError::InvalidInstruction),
+        _ => return Err(ProgramError::InvalidInstructionData),
     }
 
     // Update candy machine account data
@@ -282,18 +262,18 @@ fn process_instruction(
 }
 
 impl CandyMachine {
-    fn pack_into<'a>(&self, dst: &'a mut [u8]) -> Result<&'a mut [u8], ProgramError> {
+    fn pack_into(&self, dst: &mut Vec<u8>) -> Result<(), ProgramError> {
         // Serialization logic goes here
         // Example: Use bincode to serialize the struct into bytes
-        let encoded = bincode::serialize(self)?;
-        dst.copy_from_slice(&encoded);
-        Ok(dst)
+        let encoded = bincode::serialize(self).map_err(|err| ProgramError::Custom(err.to_string()))?;
+        dst.extend_from_slice(&encoded);
+        Ok(())
     }
 
     fn unpack_unchecked(src: &[u8]) -> Result<Self, ProgramError> {
         // Deserialization logic goes here
         // Example: Use bincode to deserialize bytes into the struct
-        let decoded: Self = bincode::deserialize(src)?;
+        let decoded: Self = bincode::deserialize(src).map_err(|err| ProgramError::Custom(err.to_string()))?;
         Ok(decoded)
     }
 }

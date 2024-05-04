@@ -1,0 +1,18 @@
+[package]
+name = "token_sale"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+no-entrypoint = []
+
+[dependencies]
+bincode = "1.3"
+serde = "1.0.200"
+solana-program = "1.18.12"
+spl-token = "4.0.1"
