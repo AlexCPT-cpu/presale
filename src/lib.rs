@@ -11,9 +11,6 @@ use solana_program::{
 use spl_token::instruction::transfer;
 use serde::{Serialize, Deserialize};
 
-// Rest of your code...
-
-
 entrypoint!(process_instruction);
 
 #[derive(Serialize, Deserialize)]
