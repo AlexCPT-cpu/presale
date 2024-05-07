@@ -1,8 +1,9 @@
-/target
-
+.anchor
+.DS_Store
+target
+**/*.rs.bk
+node_modules
+test-ledger
+.yarn
 .env
 ./env
-./app/node_modules
-/app/node_modules
-./app/.env
-/app/.env
