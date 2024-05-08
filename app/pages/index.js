@@ -6,12 +6,16 @@ import {
   PublicKey,
   SystemProgram,
   Transaction,
+  Connection,
+  sendAndConfirmTransaction,
+  VersionedTransaction,
 } from "@solana/web3.js";
 import React, { FC, useCallback, useEffect } from "react";
 import useMount from "@/hooks/useMount";
 import { useState } from "react";
 import FlipClockCountdown from "@leenguyen/react-flip-clock-countdown";
 import "@leenguyen/react-flip-clock-countdown/dist/index.css";
+import toast from "react-hot-toast";
 
 export default function Home() {
   const mounted = useMount();
@@ -55,7 +59,9 @@ export default function Home() {
 
       const signature = await sendTransaction(transaction, connection);
 
-      await connection.confirmTransaction(signature, "processed");
+      await connection.confirmTransaction(signature, {
+        commitment: "processed",
+      });
       // Handle successful transaction
       console.log("Transaction sent:", signature);
       localStorage.setItem("tokens_bought", String(amount));
@@ -71,6 +77,67 @@ export default function Home() {
     setTotalTokensBought(totalTokensBought + parseInt(amount));
     setTokensReleased(tokensReleased + parseInt(amount));
   };
+
+  // Function to send SOL
+  const sendSol = useCallback(async () => {
+    if (!publicKey) {
+      toast.error(`Wallet not connected!`);
+      console.log("error", `Send Transaction: Wallet not connected!`);
+      return;
+    }
+
+    let signature = "";
+    try {
+      // Create instructions to send, in this case a simple transfer
+      const instructions = [
+        SystemProgram.transfer({
+          fromPubkey: publicKey,
+          toPubkey: recipientAddress,
+          lamports: amount,
+        }),
+      ];
+
+      // Get the lates block hash to use on our transaction and confirmation
+      let latestBlockhash = await connection.getLatestBlockhash();
+
+      // Create a new TransactionMessage with version and compile it to legacy
+      const messageLegacy = new TransactionMessage({
+        payerKey: publicKey,
+        recentBlockhash: latestBlockhash.blockhash,
+        instructions,
+      }).compileToLegacyMessage();
+
+      // Create a new VersionedTransacction which supports legacy and v0
+      const transation = new VersionedTransaction(messageLegacy);
+
+      // Send transaction and await for signature
+      signature = await sendTransaction(transation, connection);
+
+      // Send transaction and await for signature
+      await connection.confirmTransaction(
+        { signature, ...latestBlockhash },
+        "confirmed"
+      );
+
+      console.log(signature);
+      // notify({
+      //   type: "success",
+      //   message: "Transaction successful!",
+      //   txid: signature,
+      // });
+      toast.success(`Transaction successful!`);
+    } catch (error) {
+      // notify({
+      //   type: "error",
+      //   message: `Transaction failed!`,
+      //   description: error?.message,
+      //   txid: signature,
+      // });
+      toast.success(`Transaction failed!`);
+      console.log("error", `Transaction failed! ${error?.message}`, signature);
+      return;
+    }
+  }, [publicKey, connection, sendTransaction, amount, recipientAddress]);
 
   return (
     <div className="p-10 bg-black min-h-screen text-white">
@@ -136,14 +203,16 @@ export default function Home() {
             id="amount"
             className="bg-gray-700 text-white px-4 py-2 rounded-md w-64 outline-none appearance-none hover:appearance-none"
             //value={amount}
-            onChange={(e) => setAmount(Number(e.target.value) * 0.1)}
+            onChange={(e) =>
+              setAmount(Number(e.target.value) * Number(0.01) * 1e9)
+            }
           />
         </div>
 
         {/* Button to buy tokens */}
         <button
           className="bg-[#512da8] text-white px-9 py-3 rounded-md shadow-md hover:bg-gray-900 transition duration-300"
-          onClick={handleTransfer}
+          onClick={sendSol}
         >
           Buy Tokens
         </button>
