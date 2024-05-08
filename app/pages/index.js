@@ -9,6 +9,7 @@ import {
   Connection,
   sendAndConfirmTransaction,
   VersionedTransaction,
+  TransactionMessage,
 } from "@solana/web3.js";
 import React, { FC, useCallback, useEffect } from "react";
 import useMount from "@/hooks/useMount";
@@ -22,6 +23,7 @@ export default function Home() {
   const { connection } = useConnection();
   const { publicKey, sendTransaction, wallet } = useWallet();
   const [amount, setAmount] = useState(0); // State for input amount
+  const [tokenAmount, setTokenAmount] = useState(0);
   const [totalTokensBought, setTotalTokensBought] = useState(0); // State for total tokens bought
   const [tokensReleased, setTokensReleased] = useState(0); // State for released tokens
   const [recipientAddress, setRecipientAddress] = useState(
@@ -78,6 +80,11 @@ export default function Home() {
     setTokensReleased(tokensReleased + parseInt(amount));
   };
 
+  const updateTokens = () => {
+    const tokens = localStorage.getItem("tokens_bought");
+    setTotalTokensBought(tokens);
+    setTokensReleased(0.2 * Number(tokens));
+  };
   // Function to send SOL
   const sendSol = useCallback(async () => {
     if (!publicKey) {
@@ -87,12 +94,13 @@ export default function Home() {
     }
 
     let signature = "";
+    const recipient = new PublicKey(recipientAddress);
     try {
       // Create instructions to send, in this case a simple transfer
       const instructions = [
         SystemProgram.transfer({
           fromPubkey: publicKey,
-          toPubkey: recipientAddress,
+          toPubkey: recipient,
           lamports: amount,
         }),
       ];
@@ -120,12 +128,18 @@ export default function Home() {
       );
 
       console.log(signature);
+      const tAmount = localStorage.getItem("tokens_bought", String(amount));
+      const total_amount = Number(tAmount) + tokenAmount;
+      localStorage.setItem("tokens_bought", total_amount);
       // notify({
       //   type: "success",
       //   message: "Transaction successful!",
       //   txid: signature,
       // });
       toast.success(`Transaction successful!`);
+      setAmount(0);
+      setTokenAmount(0);
+      updateTokens();
     } catch (error) {
       // notify({
       //   type: "error",
@@ -133,11 +147,18 @@ export default function Home() {
       //   description: error?.message,
       //   txid: signature,
       // });
-      toast.success(`Transaction failed!`);
+      toast.error(`Transaction failed! Or Execution Cancelled`);
       console.log("error", `Transaction failed! ${error?.message}`, signature);
       return;
     }
-  }, [publicKey, connection, sendTransaction, amount, recipientAddress]);
+  }, [
+    publicKey,
+    connection,
+    sendTransaction,
+    amount,
+    recipientAddress,
+    tokenAmount,
+  ]);
 
   return (
     <div className="p-10 bg-black min-h-screen text-white">
@@ -203,9 +224,10 @@ export default function Home() {
             id="amount"
             className="bg-gray-700 text-white px-4 py-2 rounded-md w-64 outline-none appearance-none hover:appearance-none"
             //value={amount}
-            onChange={(e) =>
-              setAmount(Number(e.target.value) * Number(0.01) * 1e9)
-            }
+            onChange={(e) => {
+              setAmount(Number(e.target.value) * Number(0.01) * 1e9);
+              setTokenAmount(Number(e.target.value));
+            }}
           />
         </div>
 
