@@ -19,7 +19,6 @@ pub fn create(ctx: Context<Create>) -> ProgramResult {
         campaign.amount_withdrawn = 0;
         campaign.total_tokens = 100 * 1_000_000; // 100 tokens converted to lamports
         campaign.token_price = 100_000; // 0.1 SOL (100_000 lamports) per token
-
         // Initialize tokens_sold and sale_ongoing
         campaign.tokens_sold = 0;
         campaign.sale_ongoing = true; // Sale is ongoing initially

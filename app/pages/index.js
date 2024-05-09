@@ -30,55 +30,135 @@ export default function Home() {
     "HmwhDijzFs1uBw7h8yWqcZvhLNUuJR61sSidRDabp7kz"
   );
 
+  // Define program ID and payer account
+
   useEffect(() => {
     const tokens = localStorage.getItem("tokens_bought");
     setTotalTokensBought(tokens);
     setTokensReleased(0.2 * Number(tokens));
   }, []);
 
-  const handleTransfer = async () => {
-    // if (!wallet.connected) {
-    //   // Handle case where wallet is not connected
-    //   alert("Please Connect Your Wallet");
-    //   return;
-    // }
-    // if (!publicKey) throw new WalletNotConnectedError();
-    if (!amount || amount <= 0) {
-      alert("Please Enter an amount");
-      return;
-    }
-    const recipientPublicKey = new PublicKey(recipientAddress);
-    const lamports = parseInt(amount) * 1000000000; // Convert SOL to lamports
-    const transaction = new Transaction().add(
-      SystemProgram.transfer({
-        fromPubkey: publicKey,
-        toPubkey: recipientPublicKey,
-        lamports: lamports,
-      })
-    );
-    try {
-      // Construct and sign transaction
-
-      const signature = await sendTransaction(transaction, connection);
-
-      await connection.confirmTransaction(signature, {
-        commitment: "processed",
-      });
-      // Handle successful transaction
-      console.log("Transaction sent:", signature);
-      localStorage.setItem("tokens_bought", String(amount));
-    } catch (error) {
-      // Handle transaction error
-      console.error("Transaction failed:", error);
-    }
-  };
-
   const handleBuyTokens = () => {
-    // Add your logic here to handle buying tokens
-    // For now, just update the total tokens bought and released tokens with the input amount
     setTotalTokensBought(totalTokensBought + parseInt(amount));
     setTokensReleased(tokensReleased + parseInt(amount));
   };
+
+  // Function to create a new campaign account
+  const createCampaignAccount = useCallback(async () => {
+    try {
+      const programId = new PublicKey(
+        "Ew9dAwC9poiMPCEVf3RJeSTnSNCo3j4qFp8yR4x35S4U"
+      );
+      // Generate a new keypair for the campaign account
+      const campaignAccount = Keypair.generate();
+
+      const accounts = [
+        {
+          pubkey: publicKey,
+          isSigner: true,
+          isWritable: true,
+        },
+        {
+          pubkey: campaignAccount.publicKey,
+          isSigner: false,
+          isWritable: true,
+        },
+        // Add other accounts if needed (e.g., user account)
+      ];
+
+      // Define initial lamports and space
+      const lamports = 1000000; // Example: 1 SOL (in lamports)
+      const space = 8192; // Example: 8 KB
+
+      let latestBlockhash = await connection.getLatestBlockhash();
+
+      // Construct the transaction
+      const transaction = new Transaction({
+        recentBlockhash: latestBlockhash,
+      })
+        .add(
+          SystemProgram.createAccount({
+            fromPubkey: publicKey,
+            newAccountPubkey: campaignAccount.publicKey,
+            lamports: lamports,
+            space: space,
+            programId: programId,
+          })
+        )
+        .add({
+          accounts: accounts.map((acc) => ({
+            pubkey: acc.pubkey,
+            isSigner: acc.isSigner,
+            isWritable: acc.isWritable,
+          })),
+        });
+
+      // Sign and send the transaction
+      const signature = await window.solana.signTransaction(transaction);
+      const txid = await connection.sendRawTransaction(signature.serialize());
+      console.log("Transaction ID:", txid);
+    } catch (error) {
+      console.error("Error creating campaign account:", error);
+    }
+  }, [connection, publicKey]);
+  const createCampaignAccount2 = useCallback(async () => {
+    try {
+      const programId = new PublicKey(
+        "Ew9dAwC9poiMPCEVf3RJeSTnSNCo3j4qFp8yR4x35S4U"
+      );
+      // Generate a new keypair for the campaign account
+      const campaignAccount = Keypair.generate();
+
+      const accounts = [
+        {
+          pubkey: publicKey,
+          isSigner: true,
+          isWritable: true,
+        },
+        {
+          pubkey: campaignAccount.publicKey,
+          isSigner: false,
+          isWritable: true,
+        },
+        // Add other accounts if needed (e.g., user account)
+      ];
+
+      // Define initial lamports and space
+      const lamports = 1000000; // Example: 1 SOL (in lamports)
+      const space = 8192; // Example: 8 KB
+
+      let latestBlockhash = await connection.getLatestBlockhash();
+
+      const createAccountTransaction = new Transaction({
+        recentBlockhash: latestBlockhash,
+        feePayer: publicKey,
+      })
+        .add(
+          SystemProgram.createAccount({
+            fromPubkey: publicKey,
+            newAccountPubkey: campaignAccount.publicKey,
+            lamports: lamports,
+            space: space,
+            programId: programId,
+          })
+        )
+        .add({
+          accounts: accounts.map((acc) => ({
+            pubkey: acc.pubkey,
+            isSigner: acc.isSigner,
+            isWritable: acc.isWritable,
+          })),
+        });
+      const signature = await window.solana.signTransaction(
+        createAccountTransaction
+      );
+      const txid = await connection.sendRawTransaction(signature.serialize());
+      console.log("Transaction ID:", txid);
+      console.log(publicKey, campaignAccount.publicKey);
+    } catch (error) {
+      console.error("Error creating campaign account:", error);
+    }
+  }, [connection, publicKey]);
 
   const updateTokens = () => {
     const tokens = localStorage.getItem("tokens_bought");
@@ -237,6 +317,13 @@ export default function Home() {
           onClick={sendSol}
         >
           Buy Tokens
+        </button>
+
+        <button
+          className="bg-[#512da8] text-white px-9 py-3 rounded-md shadow-md hover:bg-gray-900 transition duration-300 mt-10"
+          onClick={createCampaignAccount2}
+        >
+          Create Campaign
         </button>
       </div>
     </div>
